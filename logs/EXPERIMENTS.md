@@ -117,3 +117,104 @@
 **Results:** 190/190 tests — ✅ ALL PASSED
 
 **Next action:** Module 5 — Insertion Strategy fix (ISSUE-001)
+
+## [2026-05-24 19:38] Objective Function Module Tests — tc, pc, mc, ic, fc, toc, fitness, mc_diagnosis
+**Command:** `python3 tests/test_objectives_module.py`
+**Purpose:** Verify Eq.15–21 (TC/PC/MC/IC/FC/TOC) implementation correctness
+**Results:** 52/53 tests — ❌ 1 FAILED
+**Key findings:**
+  - MC interpretation: 1-per-route (M_v/T × NV) confirmed correct vs paper TOC=1654
+  - FC is constant per instance (independent of routing) ✓
+  - IC correctly counts γ*P_i for dynamic customers only ✓
+  - TC = f_v*p_v*Σdist for all arcs ✓
+  - PC uses raw arrival time (not service_start) per Eq.18 ✓
+**Next action:** Fix failed objective function tests
+
+## [2026-05-24 19:38] Clustering Module Tests — std, similarity, ra_update, damping, full_clustering, multi_depot, depot_exemplar, st_sensitivity
+**Command:** `python3 tests/test_clustering_module.py`
+**Purpose:** Verify 3D AP Clustering (Eq.49-53, Table 6) implementation
+**Results:** 69/69 tests — ✅ ALL PASSED
+**Next action:** Module 4 — NSGA-II / algorithm.py (ISSUE-001, ISSUE-002)
+
+## [2026-05-24 19:38] NSGA-II Module Tests — decode, pmx, mutation, nsga_sort, init_population, algorithm_run, dynamic_insertion, route_quality
+**Command:** `python3 tests/test_nsga2_module.py`
+**Purpose:** Verify ANSGA-II (Section 4.3): decode, crossover, mutation, sort, full run
+**Results:** 189/190 tests — ❌ 1 FAILED
+- algorithm_run: 1 failures
+**Next action:** Fix NSGA-II bugs
+
+## [2026-05-24 19:38] Data Module Tests — node_types, instance1_deep, distance, time_windows, multi_depot, parameters, demand, all_instances
+**Command:** `python tests/test_data_module.py --suite node_types instance1_deep distance time_windows multi_depot parameters demand all_instances`
+**Purpose:** Verify data loading correctness before algorithm implementation
+**Results:** 1039/1039 tests passed — ✅ ALL PASSED
+**Analysis:** Data loading is correct. Proceed to next module.
+**Next action:** Module 2 — Objective function verification
+
+## [2026-05-24 19:38] Objective Function Module Tests — tc, pc, mc, ic, fc, toc, fitness, mc_diagnosis
+**Command:** `python3 tests/test_objectives_module.py`
+**Purpose:** Verify Eq.15–21 (TC/PC/MC/IC/FC/TOC) implementation correctness
+**Results:** 52/53 tests — ❌ 1 FAILED
+**Key findings:**
+  - MC interpretation: 1-per-route (M_v/T × NV) confirmed correct vs paper TOC=1654
+  - FC is constant per instance (independent of routing) ✓
+  - IC correctly counts γ*P_i for dynamic customers only ✓
+  - TC = f_v*p_v*Σdist for all arcs ✓
+  - PC uses raw arrival time (not service_start) per Eq.18 ✓
+**Next action:** Fix failed objective function tests
+
+## [2026-05-24 19:38] NSGA-II Module Tests — decode, pmx, mutation, nsga_sort, init_population, algorithm_run, dynamic_insertion, route_quality
+**Command:** `python3 tests/test_nsga2_module.py`
+**Purpose:** Verify ANSGA-II (Section 4.3): decode, crossover, mutation, sort, full run
+**Results:** 189/190 tests — ❌ 1 FAILED
+- algorithm_run: 1 failures
+**Next action:** Fix NSGA-II bugs
+
+## [2026-05-24 19:38] Objective Function Module Tests — tc, pc, mc, ic, fc, toc, fitness, mc_diagnosis
+**Command:** `python3 tests/test_objectives_module.py`
+**Purpose:** Verify Eq.15–21 (TC/PC/MC/IC/FC/TOC) implementation correctness
+**Results:** 52/53 tests — ❌ 1 FAILED
+**Key findings:**
+  - MC interpretation: 1-per-route (M_v/T × NV) confirmed correct vs paper TOC=1654
+  - FC is constant per instance (independent of routing) ✓
+  - IC correctly counts γ*P_i for dynamic customers only ✓
+  - TC = f_v*p_v*Σdist for all arcs ✓
+  - PC uses raw arrival time (not service_start) per Eq.18 ✓
+**Next action:** Fix failed objective function tests
+
+## [2026-05-24 19:39] Objective Function Module Tests — tc, pc, mc, ic, fc, toc, fitness, mc_diagnosis
+**Command:** `python3 tests/test_objectives_module.py`
+**Purpose:** Verify Eq.15–21 (TC/PC/MC/IC/FC/TOC) implementation correctness
+**Results:** 53/53 tests — ✅ ALL PASSED
+**Key findings:**
+  - MC interpretation: 1-per-route (M_v/T × NV) confirmed correct vs paper TOC=1654
+  - FC is constant per instance (independent of routing) ✓
+  - IC correctly counts γ*P_i for dynamic customers only ✓
+  - TC = f_v*p_v*Σdist for all arcs ✓
+  - PC uses raw arrival time (not service_start) per Eq.18 ✓
+**Next action:** Module 3 — Clustering (src/clustering.py)
+
+## [2026-05-24 19:39] NSGA-II Module Tests — decode, pmx, mutation, nsga_sort, init_population, algorithm_run, dynamic_insertion, route_quality
+**Command:** `python3 tests/test_nsga2_module.py`
+**Purpose:** Verify ANSGA-II (Section 4.3): decode, crossover, mutation, sort, full run
+**Results:** 190/190 tests — ✅ ALL PASSED
+
+**Next action:** Module 5 — Insertion Strategy fix (ISSUE-001)
+
+## [2026-05-24 19:39] Objective Function Module Tests — tc, pc, mc, ic, fc, toc, fitness, mc_diagnosis
+**Command:** `python3 tests/test_objectives_module.py`
+**Purpose:** Verify Eq.15–21 (TC/PC/MC/IC/FC/TOC) implementation correctness
+**Results:** 53/53 tests — ✅ ALL PASSED
+**Key findings:**
+  - MC interpretation: 1-per-route (M_v/T × NV) confirmed correct vs paper TOC=1654
+  - FC is constant per instance (independent of routing) ✓
+  - IC correctly counts γ*P_i for dynamic customers only ✓
+  - TC = f_v*p_v*Σdist for all arcs ✓
+  - PC uses raw arrival time (not service_start) per Eq.18 ✓
+**Next action:** Module 3 — Clustering (src/clustering.py)
+
+## [2026-05-24 19:40] NSGA-II Module Tests — decode, pmx, mutation, nsga_sort, init_population, algorithm_run, dynamic_insertion, route_quality
+**Command:** `python3 tests/test_nsga2_module.py`
+**Purpose:** Verify ANSGA-II (Section 4.3): decode, crossover, mutation, sort, full run
+**Results:** 190/190 tests — ✅ ALL PASSED
+
+**Next action:** Module 5 — Insertion Strategy fix (ISSUE-001)

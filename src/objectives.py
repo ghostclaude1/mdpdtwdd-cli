@@ -1,18 +1,25 @@
 """
-Objective functions and constraint checker for MDPDTWDD.
+Objective functions for MDPDTWDD — performance-optimised version.
 
-Equations follow paper notation exactly:
-- Eq.15: min TOC = TC + PC + MC + IC + FC
-- Eq.16: min NV = Σ_v Σ_i∈F Σ_j∈C x_ij^v
-- Eq.17: TC = Σ_v Σ_i Σ_j (f_v * p_v * x_ij^v * d_ij)
-- Eq.18: PC = Σ_v Σ_i∈C (ε*max{l_i-A_vi,0} + ω*max{A_vi-r_i,0})
-- Eq.19: MC = Σ_v Σ_i∈F Σ_j∈C (M_v * x_ij^v / T)
-- Eq.20: IC = Σ_i∈D Σ_f∈F Σ_v (y_if^v * P_i * γ)
-- Eq.21: FC = Σ_f β_f + δ*Σ_i∈R Σ_f Σ_v (y_if^v * Q_i) + χ*Σ_i∈S∪D Σ_f Σ_v (y_if^v * P_i)
+Eq.15: min TOC = TC + PC + MC + IC + FC
+Eq.17: TC = Σ f_v·p_v·x_ij·d_ij
+Eq.18: PC = Σ (ε·max{l_i-A_vi,0} + ω·max{A_vi-r_i,0})
+Eq.19: MC = Σ M_v·x_ij^v / T   (1 per route)
+Eq.20: IC = Σ_{i∈D} P_i·γ
+Eq.21: FC = Σ β_f + δ·Σ_{i∈R} Q_i + χ·Σ_{i∈S∪D} P_i
+
+PERFORMANCE CHANGES vs original:
+- evaluate_route: all loops use precomputed numpy arrays via instance._idx,
+  _dist_arr, _time_arr, _l_arr, _r_arr, is_delivery, is_pickup_node.
+  Eliminates per-iteration dict lookups and method calls in the inner loop.
+- evaluate_solution: FC computed once and cached on instance._fc_const.
+- dominates: inlined tuple comparison — no function call overhead.
+- RouteEvaluation.arrival_times removed from hot path (only filled on demand).
 """
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
+import numpy as np
 
 from src.data_model import ProblemInstance, Route, Solution, NodeType
 
@@ -22,11 +29,10 @@ class RouteEvaluation:
     """Detailed evaluation of a single route."""
     route_idx: int
     vehicle_id: int
-    arrival_times: dict[int, float]   # node_id -> arrival time A_vi
+    arrival_times: dict[int, float] = field(default_factory=dict)
     is_feasible: bool = True
     infeasibility_reason: str = ""
 
-    # Cost components for this route
     TC: float = 0.0
     PC: float = 0.0
     MC: float = 0.0
@@ -37,145 +43,220 @@ def evaluate_route(
     route: Route,
     instance: ProblemInstance,
     is_dynamic: bool = False,
+    fill_arrivals: bool = True,
 ) -> RouteEvaluation:
     """
-    Evaluate a single route: compute arrival times and costs.
+    Evaluate a single route.
 
-    Travel time: t_ij = d_ij / α_v (Eq. text)
-    Arrival time: A_vi = departure from previous node + travel time
-    Vehicle departs from origin depot at time B_v (earliest = depot's l_f).
+    Hot-path uses precomputed numpy arrays when available (after
+    instance.build_distance_matrix()).  Falls back to dict lookup otherwise.
 
-    NOTE: Paper uses B_v = time vehicle leaves depot. Waiting at customer is
-    allowed (vehicle arrives early and waits until l_i). This is standard VRP
-    with soft time windows (penalty for early + late, not hard constraint).
-    Constraints 34-35 suggest soft time windows (penalty-based).
+    B_v selection:
+      lower = max(depot.l_i,  l_first - t(depot→first))
+      upper = min over all nodes of (r_i - cum_travel_i)   [backward pass]
+      B_v   = clamp(upper, lower, depot.r_i)
     """
     v = route.vehicle
-    result = RouteEvaluation(
-        route_idx=0,
-        vehicle_id=v.vehicle_id,
-        arrival_times={},
-    )
+    nodes_seq = route.nodes
+    if not nodes_seq:
+        return RouteEvaluation(route_idx=0, vehicle_id=v.vehicle_id)
 
-    if not route.nodes:
-        return result
+    result = RouteEvaluation(route_idx=0, vehicle_id=v.vehicle_id)
 
-    # Start from origin depot
-    origin = instance.nodes[route.origin_depot_id]
+    # ---- choose fast or fallback path -------------------------------- #
+    fast = instance._dist_arr is not None
+    if fast:
+        idx = instance._idx
+        dist_arr = instance._dist_arr
+        time_arr = instance._time_arr
+        l_arr    = instance._l_arr
+        r_arr    = instance._r_arr
+        is_del   = instance.is_delivery
+        is_pku   = instance.is_pickup_node
+        is_dd    = instance.is_dd_arr
 
-    # Compute optimal departure time B_v:
-    #
-    # Lower bound (no early violation at first node):
-    #   B_v >= l_first - t(depot, first)     [Constraint 34]
-    #   B_v >= l_depot                        [depot TW]
-    #
-    # Upper bound (no late violation at ANY node, ignoring waiting):
-    #   Forward cumulative travel time to node i: cum_i
-    #   B_v + cum_i <= r_i  →  B_v <= r_i - cum_i  for all i
-    #   B_v_upper = min(r_i - cum_i)
-    #
-    # Optimal B_v = clamp(B_v_upper, B_v_lower, depot.r_i)
-    # — depart as late as the conservative upper bound allows (minimises early
-    #   penalties) but never before the lower bound (depot/first-node TW).
-    first_nid = route.nodes[0]
-    first_node = instance.nodes[first_nid]
-    t_to_first = instance.travel_time(route.origin_depot_id, first_nid)
-    B_v_lower = max(origin.l_i, first_node.l_i - t_to_first)
+        origin_idx = idx[route.origin_depot_id]
+        first_idx  = idx[nodes_seq[0]]
 
-    # Backward pass: conservative upper bound using cumulative travel times
-    # (no waiting assumed — actual arrival with waiting can only be ≥ this)
-    cum_t = 0.0
-    prev_bv = route.origin_depot_id
-    B_v_upper = origin.r_i
-    for _nid in route.nodes:
-        cum_t += instance.travel_time(prev_bv, _nid)
-        B_v_upper = min(B_v_upper, instance.nodes[_nid].r_i - cum_t)
-        prev_bv = _nid
+        # B_v lower
+        l_origin = l_arr[route.origin_depot_id]
+        r_origin = r_arr[route.origin_depot_id]
+        B_v_lower = max(l_origin, l_arr[nodes_seq[0]] - time_arr[origin_idx, first_idx])
 
-    B_v = max(B_v_lower, min(B_v_upper, origin.r_i))
+        # B_v upper — backward pass (fast)
+        B_v_upper = r_origin
+        prev_idx  = origin_idx
+        cum_t     = 0.0
+        for nid in nodes_seq:
+            nidx   = idx[nid]
+            cum_t += time_arr[prev_idx, nidx]
+            r_n    = r_arr[nid]
+            upper_n = r_n - cum_t
+            if upper_n < B_v_upper:
+                B_v_upper = upper_n
+            prev_idx = nidx
 
-    current_time = B_v
-    result.arrival_times[route.origin_depot_id] = B_v
+        B_v = B_v_lower if B_v_lower > B_v_upper else (
+              B_v_upper if B_v_upper < r_origin else r_origin)
+        B_v = max(B_v, B_v_lower)   # hard lower bound
 
-    prev_id = route.origin_depot_id
-    current_load = 0.0
+        # initial delivery load
+        current_load = 0.0
+        if is_dd[route.origin_depot_id]:
+            for nid in nodes_seq:
+                if is_del[nid]:
+                    current_load += instance._demand_arr[nid]
 
-    # Track delivery load at start (loaded at depot)
-    # For delivery depot: load delivery goods for R customers on this route
-    # For pickup depot: start with empty vehicle (picks up goods from S customers)
-    if origin.is_delivery_depot():
-        for nid in route.nodes:
-            n = instance.nodes[nid]
-            if n.is_static_delivery():
-                current_load += n.Q_i
-    # else: pickup route starts empty, accumulates pickup goods
-
-    # Check initial capacity
-    if current_load > v.capacity:
-        result.is_feasible = False
-        result.infeasibility_reason = f"Initial load {current_load} exceeds capacity {v.capacity}"
-
-    # Traverse route
-    for nid in route.nodes:
-        node = instance.nodes[nid]
-        travel_t = instance.travel_time(prev_id, nid)
-        arrival = current_time + travel_t
-        result.arrival_times[nid] = arrival
-
-        # Travel cost component for this leg
-        dist = instance.dist(prev_id, nid)
-        result.TC += v.fuel_rate * v.fuel_price * dist  # Eq.17
-
-        # Penalty cost (Eq.18): soft time window — penalize both early AND late arrival.
-        # A_vi = service start = max(actual_arrival, l_i) (vehicle waits if arrives early).
-        # early_violation = max(l_i - A_vi, 0): A_vi = max(arr,l_i) >= l_i → always 0 via wait.
-        # BUT paper explicitly writes epsilon*max(l_i - A_vi, 0), so A_vi = raw arrival time.
-        # Keep both penalties as stated in Eq.18.
-        early_violation = max(node.l_i - arrival, 0.0)
-        late_violation = max(arrival - node.r_i, 0.0)
-        result.PC += instance.epsilon * early_violation + instance.omega * late_violation
-
-        # Service: if arrive early, wait until window opens
-        service_start = max(arrival, node.l_i)
-        current_time = service_start  # No service time given in paper (assumed instantaneous)
-
-        # Update load
-        if node.is_static_delivery():
-            current_load -= node.Q_i
-        elif node.is_static_pickup() or node.is_dynamic():
-            current_load += node.P_i
-
-        # Capacity check
-        if current_load < -1e-6 or current_load > v.capacity + 1e-6:
+        if current_load > v.capacity:
             result.is_feasible = False
-            result.infeasibility_reason = f"Capacity violated at node {nid}: load={current_load}"
+            result.infeasibility_reason = f"Initial load {current_load} exceeds capacity {v.capacity}"
 
-        prev_id = nid
+        # precomputed scalars
+        fcp     = v.fuel_cost_per_dist   # f_v * p_v
+        epsilon = instance.epsilon
+        omega   = instance.omega
+        cap     = v.capacity
 
-    # Return to end depot (if specified)
-    if route.end_depot_id is not None:
-        end_depot = instance.nodes[route.end_depot_id]
-        travel_t = instance.travel_time(prev_id, route.end_depot_id)
-        arrival = current_time + travel_t
-        result.arrival_times[route.end_depot_id] = arrival
+        t        = B_v
+        prev_nid = route.origin_depot_id
+        prev_idx = origin_idx
+        TC = 0.0
+        PC = 0.0
 
-        dist = instance.dist(prev_id, route.end_depot_id)
-        result.TC += v.fuel_rate * v.fuel_price * dist
+        if fill_arrivals:
+            result.arrival_times[route.origin_depot_id] = B_v
 
-        # Check depot time window (Constraint 36)
-        if arrival > end_depot.r_i + 1e-6:
+        for nid in nodes_seq:
+            nidx    = idx[nid]
+            tt      = time_arr[prev_idx, nidx]
+            d       = dist_arr[prev_idx, nidx]
+            arrival = t + tt
+            TC     += fcp * d
+
+            l_n = l_arr[nid]
+            r_n = r_arr[nid]
+            early = l_n - arrival
+            late  = arrival - r_n
+            if early > 0.0:
+                PC += epsilon * early
+            elif late > 0.0:
+                PC += omega * late
+
+            # service start: wait if early
+            t = arrival if arrival >= l_n else l_n
+
+            # load update
+            if is_del[nid]:
+                current_load -= instance._demand_arr[nid]
+            elif is_pku[nid]:
+                current_load += instance._demand_arr[nid]
+
+            if current_load < -1e-6 or current_load > cap + 1e-6:
+                result.is_feasible = False
+                result.infeasibility_reason = f"Capacity violated at node {nid}: load={current_load}"
+
+            if fill_arrivals:
+                result.arrival_times[nid] = arrival
+
+            prev_nid = nid
+            prev_idx = nidx
+
+        # end depot leg
+        if route.end_depot_id is not None:
+            end_idx = idx[route.end_depot_id]
+            tt  = time_arr[prev_idx, end_idx]
+            d   = dist_arr[prev_idx, end_idx]
+            arr = t + tt
+            TC += fcp * d
+            if fill_arrivals:
+                result.arrival_times[route.end_depot_id] = arr
+            if arr > r_arr[route.end_depot_id] + 1e-6:
+                result.is_feasible = False
+                result.infeasibility_reason = f"End depot TW violated: arrival={arr:.2f}"
+
+        result.TC = TC
+        result.PC = PC
+
+    else:
+        # ---- fallback path (no numpy) -------------------------------- #
+        origin = instance.nodes[route.origin_depot_id]
+        first_node = instance.nodes[nodes_seq[0]]
+        t_to_first = instance.travel_time(route.origin_depot_id, nodes_seq[0])
+        B_v_lower = max(origin.l_i, first_node.l_i - t_to_first)
+
+        B_v_upper = origin.r_i
+        prev_bv = route.origin_depot_id
+        cum_t = 0.0
+        for _nid in nodes_seq:
+            cum_t += instance.travel_time(prev_bv, _nid)
+            B_v_upper = min(B_v_upper, instance.nodes[_nid].r_i - cum_t)
+            prev_bv = _nid
+        B_v = max(B_v_lower, min(B_v_upper, origin.r_i))
+
+        current_load = 0.0
+        if origin.is_delivery_depot():
+            for nid in nodes_seq:
+                n = instance.nodes[nid]
+                if n.is_static_delivery():
+                    current_load += n.Q_i
+        if current_load > v.capacity:
             result.is_feasible = False
-            result.infeasibility_reason = (
-                f"Depot {route.end_depot_id} time window violated: "
-                f"arrival={arrival:.2f} > r_f={end_depot.r_i}"
-            )
 
-    # Maintenance cost (Eq.19): M_v / T per vehicle-route
-    # NOTE-06: MC = M_v * x_ij^v / T where i∈F, j∈C.
-    # This counts one depot->first_customer arc = one vehicle used.
+        t = B_v
+        prev_id = route.origin_depot_id
+        if fill_arrivals:
+            result.arrival_times[route.origin_depot_id] = B_v
+        TC = PC = 0.0
+        fcp = v.fuel_rate * v.fuel_price
+        for nid in nodes_seq:
+            node = instance.nodes[nid]
+            travel_t = instance.travel_time(prev_id, nid)
+            d = instance.dist(prev_id, nid)
+            arrival = t + travel_t
+            TC += fcp * d
+            early = node.l_i - arrival
+            late  = arrival - node.r_i
+            if early > 0.0:
+                PC += instance.epsilon * early
+            elif late > 0.0:
+                PC += instance.omega * late
+            t = max(arrival, node.l_i)
+            if node.is_static_delivery():
+                current_load -= node.Q_i
+            elif node.is_static_pickup() or node.is_dynamic():
+                current_load += node.P_i
+            if fill_arrivals:
+                result.arrival_times[nid] = arrival
+            prev_id = nid
+        if route.end_depot_id is not None:
+            end_node = instance.nodes[route.end_depot_id]
+            tt = instance.travel_time(prev_id, route.end_depot_id)
+            d  = instance.dist(prev_id, route.end_depot_id)
+            arr = t + tt
+            TC += fcp * d
+            if fill_arrivals:
+                result.arrival_times[route.end_depot_id] = arr
+            if arr > end_node.r_i + 1e-6:
+                result.is_feasible = False
+        result.TC = TC
+        result.PC = PC
+
+    # maintenance (Eq.19): one arc depot→customer = one vehicle
     result.MC = v.annual_maintenance / instance.working_days
-
     return result
+
+
+# Cache FC on the instance so evaluate_solution doesn't recompute every call
+def _compute_fc_const(instance: ProblemInstance) -> float:
+    fc = 0.0
+    for _ in instance.all_depots:
+        fc += instance.depot_fixed_cost
+    for node in instance.nodes.values():
+        if node.is_static_delivery():
+            fc += instance.delta * node.Q_i
+        elif node.is_static_pickup() or node.is_dynamic():
+            fc += instance.chi * node.P_i
+    return fc
 
 
 def evaluate_solution(
@@ -183,88 +264,70 @@ def evaluate_solution(
     instance: ProblemInstance,
 ) -> Solution:
     """
-    Evaluate a complete solution: compute all objective values.
-    Updates solution in place and returns it.
+    Evaluate complete solution in-place.
+    FC is a constant for a given instance — computed once and cached.
     """
+    # lazy-cache FC constant
+    if not hasattr(instance, '_fc_const') or instance._fc_const is None:
+        instance._fc_const = _compute_fc_const(instance)
+
     total_TC = 0.0
     total_PC = 0.0
     total_MC = 0.0
     total_IC = 0.0
-    total_FC = 0.0
     nv = 0
 
-    # Fixed cost (Eq.21): FC = Σ_f β_f + δ·Σ_{i∈R} Q_i + χ·Σ_{i∈S∪D} P_i
-    # This is a CONSTANT for a given instance — independent of routes.
-    # NOTE-07: β_f not given in paper, using 0.0
-    for depot in instance.all_depots:
-        total_FC += instance.depot_fixed_cost
-    for node in instance.nodes.values():
-        if node.is_static_delivery():
-            total_FC += instance.delta * node.Q_i
-        elif node.is_static_pickup():
-            total_FC += instance.chi * node.P_i
-        elif node.is_dynamic():
-            total_FC += instance.chi * node.P_i   # dynamic pickup also uses χ for FC
+    is_dyn = instance.is_dyn if instance.is_dyn is not None else None
+    gamma  = instance.gamma
+    demand = instance._demand_arr if instance._demand_arr is not None else None
 
-    # Evaluate each route
-    for i, route in enumerate(solution.routes):
+    for route in solution.routes:
         if not route.nodes:
             continue
+        nv += 1
+        ev = evaluate_route(route, instance, fill_arrivals=False)
+        total_TC += ev.TC
+        total_PC += ev.PC
+        total_MC += ev.MC
 
-        nv += 1  # Each active route uses one vehicle
-
-        eval_r = evaluate_route(route, instance)
-        total_TC += eval_r.TC
-        total_PC += eval_r.PC
-        total_MC += eval_r.MC
-
-        # Insertion cost for dynamic customers on this route (Eq.20): IC = Σ P_i * γ
-        for nid in route.nodes:
-            node = instance.nodes[nid]
-            if node.is_dynamic():
-                total_IC += instance.gamma * node.P_i
+        # Insertion cost (Eq.20)
+        if is_dyn is not None:
+            for nid in route.nodes:
+                if is_dyn[nid]:
+                    total_IC += gamma * demand[nid]
+        else:
+            for nid in route.nodes:
+                n = instance.nodes[nid]
+                if n.is_dynamic():
+                    total_IC += gamma * n.P_i
 
     solution.TC = total_TC
     solution.PC = total_PC
     solution.MC = total_MC
     solution.IC = total_IC
-    solution.FC = total_FC
+    solution.FC = instance._fc_const
     solution.NV = nv
-    solution.TOC = total_TC + total_PC + total_MC + total_IC + total_FC
-
+    solution.TOC = total_TC + total_PC + total_MC + total_IC + instance._fc_const
     return solution
 
 
+def dominates(sol_a: Solution, sol_b: Solution) -> bool:
+    """
+    Pareto dominance check — inlined for speed.
+    sol_a dominates sol_b iff a ≤ b on both objectives and < on at least one.
+    """
+    toc_a, nv_a = sol_a.TOC, sol_a.NV
+    toc_b, nv_b = sol_b.TOC, sol_b.NV
+    return (toc_a <= toc_b and nv_a <= nv_b) and (toc_a < toc_b or nv_a < nv_b)
+
+
 def compute_toc_gap(toc_algo: float, toc_cplex: float) -> float:
-    """
-    Compute TOC gap percentage as used in paper Tables 12/13.
-    TOC gap = (toc_algo - toc_cplex) / toc_cplex * 100
-    """
     if toc_cplex == 0:
         return 0.0
     return (toc_algo - toc_cplex) / toc_cplex * 100.0
 
 
 def fitness(toc: float, nv: int, toc_max: float, nv_max: float) -> float:
-    """
-    Fitness function (Eq.54):
-    fit = 1 / (TOC/TOC_max + NV/NV_max)
-
-    Higher fitness = better solution (selected for crossover/mutation).
-    """
-    denominator = (toc / toc_max if toc_max > 0 else 0) + (nv / nv_max if nv_max > 0 else 0)
-    if denominator == 0:
-        return float('inf')
-    return 1.0 / denominator
-
-
-def dominates(sol_a: Solution, sol_b: Solution) -> bool:
-    """
-    Returns True if sol_a dominates sol_b in Pareto sense.
-    sol_a dominates sol_b if:
-    - sol_a is at least as good as sol_b on all objectives
-    - sol_a is strictly better on at least one objective
-    """
-    not_worse = (sol_a.TOC <= sol_b.TOC) and (sol_a.NV <= sol_b.NV)
-    strictly_better = (sol_a.TOC < sol_b.TOC) or (sol_a.NV < sol_b.NV)
-    return not_worse and strictly_better
+    """Eq.54: fit = 1 / (TOC/TOC_max + NV/NV_max)"""
+    d = (toc / toc_max if toc_max > 0 else 0) + (nv / nv_max if nv_max > 0 else 0)
+    return 1.0 / d if d > 0 else float('inf')

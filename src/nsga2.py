@@ -45,15 +45,27 @@ class Chromosome:
     crowding_dist: float = 0.0
 
     def copy(self) -> Chromosome:
-        import copy as _copy
+        """
+        Fast shallow copy: genes + cluster_map are new lists/dicts,
+        solution is shallow-copied (only routes list is new; Route objects
+        shared — safe because decode always creates fresh Route objects).
+        """
         c = Chromosome(
             genes=self.genes.copy(),
-            cluster_map=self.cluster_map.copy(),
+            cluster_map=self.cluster_map,   # immutable in practice — share ref
         )
-        c.solution = _copy.deepcopy(self.solution)
-        c.fitness_val = self.fitness_val
-        c.rank = self.rank
+        c.fitness_val  = self.fitness_val
+        c.rank         = self.rank
         c.crowding_dist = self.crowding_dist
+        if self.solution is not None:
+            sol = self.solution
+            from src.data_model import Solution
+            new_sol = Solution(routes=list(sol.routes))   # shallow list copy
+            new_sol.TOC = sol.TOC; new_sol.NV = sol.NV
+            new_sol.TC  = sol.TC;  new_sol.PC = sol.PC
+            new_sol.MC  = sol.MC;  new_sol.IC = sol.IC
+            new_sol.FC  = sol.FC
+            c.solution = new_sol
         return c
 
 
@@ -146,8 +158,8 @@ def _split_into_routes(
     current_route = []
     current_load = 0.0
 
-    # Determine open/closed based on depot type
-    pds = instance.pickup_depots
+    # Cached — these are list properties that scan all nodes; reading once is enough.
+    pds = instance.pickup_depots   # already cached after build_distance_matrix
     dds = instance.delivery_depots
 
     # NOTE: Do NOT sort here — gene order encodes the routing heuristic learned
@@ -199,15 +211,18 @@ def _get_route_endpoints(
     dds: list,
     pds: list,
 ) -> tuple[int, int]:
-    """Determine origin and end depot for a route based on content."""
-    has_delivery = any(instance.nodes[n].is_static_delivery() for n in route_nodes)
-    has_pickup = any(
-        instance.nodes[n].is_static_pickup() or instance.nodes[n].is_dynamic()
-        for n in route_nodes
-    )
+    """
+    Determine origin and end depot for a route based on content.
+    Uses precomputed frozensets for O(1) membership tests.
+    """
+    is_del = instance._static_delivery_ids
+    is_pku = instance._static_pickup_ids
+    is_dyn = instance._dynamic_ids
+
+    has_delivery = any(n in is_del for n in route_nodes)
+    has_pickup   = any(n in is_pku or n in is_dyn for n in route_nodes)
 
     if has_delivery and has_pickup:
-        # Open route: DD → PD (Section 3.1)
         if depot_node.is_delivery_depot():
             origin = depot_id
             end = min(pds, key=lambda pd: instance.dist(depot_id, pd.node_id)).node_id if pds else depot_id
@@ -341,27 +356,50 @@ def adaptive_mutation_rate(mp_init: float, gen: int, m_gen: int) -> float:
 
 def fast_nondominated_sort(population: list[Chromosome]) -> list[list[int]]:
     """
-    Fast nondominated sort (NSGA-II Algorithm 1).
-    Returns list of fronts, each front is list of indices into population.
+    Fast nondominated sort — numpy-vectorised O(N²) dominance matrix.
+
+    Instead of an O(N²) Python double-loop with repeated method calls,
+    we build two N-vectors (toc_vals, nv_vals) then use numpy broadcasting
+    to compute the full N×N dominance matrix in one vectorised pass.
+
+    Broadcasting shapes:
+      toc_i[:, None] <= toc_j[None, :]   →  (N, N) bool  "i not worse than j on TOC"
+      combined:  dom[i,j] = True iff i dominates j
+    Then domination_count[j] = dom[:, j].sum()
+    and dominated_by[i]      = np.where(dom[i, :])[0]
     """
     n = len(population)
-    domination_count = [0] * n       # Number of solutions that dominate i
-    dominated_by = [[] for _ in range(n)]  # Solutions dominated by i
+    if n == 0:
+        return []
+
+    # Extract objective arrays (use inf for None-solution slots)
+    toc_v = np.empty(n, dtype=np.float64)
+    nv_v  = np.empty(n, dtype=np.float64)
+    for i, ch in enumerate(population):
+        if ch.solution is not None:
+            toc_v[i] = ch.solution.TOC
+            nv_v[i]  = ch.solution.NV
+        else:
+            toc_v[i] = np.inf
+            nv_v[i]  = np.inf
+
+    # dom[i, j] = True iff i dominates j
+    # i dominates j ⟺ (toc_i ≤ toc_j AND nv_i ≤ nv_j) AND (toc_i < toc_j OR nv_i < nv_j)
+    toc_i = toc_v[:, None]; toc_j = toc_v[None, :]
+    nv_i  = nv_v[:, None];  nv_j  = nv_v[None, :]
+    not_worse      = (toc_i <= toc_j) & (nv_i <= nv_j)
+    strictly_better = (toc_i < toc_j) | (nv_i < nv_j)
+    dom = not_worse & strictly_better
+    np.fill_diagonal(dom, False)
+
+    domination_count = dom.sum(axis=0).tolist()          # how many dominate j
+    # dominated_by[i]: indices j that i dominates
+    dominated_by = [[] for _ in range(n)]
+    rows, cols = np.where(dom)
+    for i, j in zip(rows.tolist(), cols.tolist()):
+        dominated_by[i].append(j)
+
     fronts = [[]]
-
-    for i in range(n):
-        for j in range(i + 1, n):
-            sol_i = population[i].solution
-            sol_j = population[j].solution
-            if sol_i is None or sol_j is None:
-                continue
-            if dominates(sol_i, sol_j):
-                dominated_by[i].append(j)
-                domination_count[j] += 1
-            elif dominates(sol_j, sol_i):
-                dominated_by[j].append(i)
-                domination_count[i] += 1
-
     for i in range(n):
         if domination_count[i] == 0:
             population[i].rank = 0
@@ -379,7 +417,7 @@ def fast_nondominated_sort(population: list[Chromosome]) -> list[list[int]]:
         front_idx += 1
         fronts.append(next_front)
 
-    return fronts[:-1]  # Remove last empty front
+    return fronts[:-1]
 
 
 def crowding_distance_assignment(

@@ -75,3 +75,43 @@
   PC component: 35000+ → 1311 (-96%)
   Dynamic insertion no longer causes TOC explosion (was +11777, now +444)
 **Remaining issues:** PC=1311 still non-zero; NV=9 vs paper 6; clustering may be sub-optimal
+
+---
+
+## [2026-05-24] Performance optimisation — 2.5× speedup
+
+**Files:** src/data_model.py, src/objectives.py, src/nsga2.py, tests/test_objectives_module.py, tests/test_nsga2_module.py
+
+**Changes:**
+
+### data_model.py — Tier 1+4
+- `build_distance_matrix()`: replaced O(N²) dict with dense numpy N×N array
+  (_dist_arr, _time_arr). All dist/travel_time calls now O(1) array index.
+- Vectorised distance build: numpy broadcasting (N,1)-(1,N) instead of double loop.
+- Precomputed frozensets for type membership (_delivery_depot_ids etc.) — O(1) set lookup.
+- Boolean lookup arrays is_delivery[], is_pickup_node[], is_dyn[] (size max_id+1).
+- Per-node scalar arrays _l_arr[], _r_arr[], _demand_arr[] for inner loop access.
+- All @property lists cached on first access (delivery_depots, pickup_depots, etc.)
+  Eliminates 6200+ redundant list comprehensions per 30-gen run.
+- Vehicle.__post_init__ caches fuel_cost_per_dist = f_v * p_v.
+- ProblemInstance._fc_const caches FC (constant per instance).
+
+### objectives.py — Tier 2
+- evaluate_route: hot path uses numpy arrays, eliminates dict.get() + method calls
+  in inner loop. 23k calls × ~10 nodes each = 230k fewer attribute lookups per 30 gen.
+- evaluate_solution: FC cached on instance._fc_const — computed once, not per call.
+- dominates: inlined as 2-comparison expression — no function call overhead.
+
+### nsga2.py — Tier 3
+- fast_nondominated_sort: numpy broadcasting replaces O(N²) Python double-loop.
+  dom[i,j] computed as vectorised boolean matrix. np.where() replaces nested loops.
+- Chromosome.copy(): custom shallow copy — avoids deepcopy(Solution) (152k calls).
+  Solution only needs new routes list; Route objects are immutable in copy context.
+- _get_route_endpoints: uses precomputed frozensets instead of per-node method calls.
+
+**Benchmark (instance 1, 150 gen, 100 pop, seed=42):**
+  Before: 8.78M calls / 11.2s
+  After:  2.13M calls /  4.4s
+  Speedup: 2.5× wall-clock, 4.1× fewer function calls
+
+**All tests pass:** objectives 53/53, clustering 69/69, nsga2 190/190, data 1039/1039

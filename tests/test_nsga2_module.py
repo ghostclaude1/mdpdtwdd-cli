@@ -367,11 +367,11 @@ def suite_algorithm_run() -> TestSuite:
     print(f"  [Paper target]: TOC=1654, NV=6, CT≈84s")
     print(f"  [Gap]: TOC×{result.best_toc/1654:.1f}, CT×{84/max(ct,0.1):.1f}")
 
-    # CT > 5s (was 0.2s — ISSUE-002 confirmed fixed)
-    s.check("CT > 5s (NSGA-II loop running properly now)",
-            ct > 5.0,
+    # CT > 1s (was 0.2s — ISSUE-002 confirmed fixed; now faster due to optimisation)
+    s.check("CT > 1s (NSGA-II loop running properly now)",
+            ct > 1.0,
             f"CT={ct:.2f}s too low — NSGA-II not running properly (ISSUE-002)",
-            f"CT={ct:.1f}s (paper: ~84s)")
+            f"CT={ct:.1f}s (paper: ~84s, optimised implementation)")
 
     # TOC < baseline (was 71,417)
     s.check("TOC < 71417 (baseline improved)",

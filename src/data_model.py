@@ -3,12 +3,21 @@ Data model for MDPDTWDD (Multi-Depot Pickup & Delivery VRP with Time Windows & D
 Paper: Wang et al. (2025), EAAI 139, 109700
 
 Notation follows Table 4 of the paper exactly.
+
+PERFORMANCE NOTES:
+- dist_matrix / time_matrix replaced by dense numpy arrays (_dist_arr, _time_arr)
+  indexed by compact 0-based index (_idx[node_id]).  O(1) array lookup vs dict hash.
+- All @property lists cached as plain attributes after build_distance_matrix().
+- Node-type membership encoded as precomputed frozensets for O(1) lookup.
+- Per-node scalar arrays (_l_arr, _r_arr, _demand_arr, _epsilon_arr, _omega_arr)
+  enable vectorised evaluate_route without per-node attribute access.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 import math
+import numpy as np
 
 
 class NodeType(Enum):
@@ -24,28 +33,18 @@ class NodeType(Enum):
 class Node:
     """
     Represents a customer or depot in the MDPDTWDD network.
-
     Attributes follow Table 4 notation.
-    [l_i, r_i] = time window of node i
-    Q_i = delivery quantity
-    P_i = pickup quantity
+    [l_i, r_i] = time window; Q_i = delivery qty; P_i = pickup qty.
     """
     node_id: int
-    x: float                    # x coordinate (or longitude for case study)
-    y: float                    # y coordinate (or latitude for case study)
+    x: float
+    y: float
     node_type: NodeType
 
-    # Demand quantities
-    Q_i: float = 0.0            # Delivery quantity (only for R set)
-    P_i: float = 0.0            # Pickup quantity (only for S, D sets)
-
-    # Time windows [l_i, r_i]
-    l_i: float = 0.0            # Early time window bound
-    r_i: float = 1000.0         # Late time window bound
-
-    # Dynamic demand arrival time (only for D set)
-    # NOTE-01: Inferred from CSV 'Known time' column.
-    # Known time = time at which dynamic demand becomes known to dispatcher.
+    Q_i: float = 0.0
+    P_i: float = 0.0
+    l_i: float = 0.0
+    r_i: float = 1000.0
     known_time: float = 0.0
 
     def is_depot(self) -> bool:
@@ -72,54 +71,47 @@ class Node:
 
 @dataclass
 class Vehicle:
-    """
-    Represents a homogeneous vehicle.
-    Paper: "Homogeneous vehicles are used" (Section 3.1).
-
-    All vehicles share the same parameters from Table 15.
-    """
+    """Homogeneous vehicle (Table 15)."""
     vehicle_id: int
-    capacity: float             # ∂_v: vehicle capacity (= 100 per Table 15)
-    speed: float                # α_v: travel speed (= 30 per Table 15)
-    fuel_rate: float            # f_v: fuel consumption rate (= 0.07 per Table 15)
-    fuel_price: float           # p_v: fuel price (= 7 per Table 15)
-    annual_maintenance: float   # M_v: annual maintenance cost (= 40000 per Table 15)
+    capacity: float
+    speed: float
+    fuel_rate: float
+    fuel_price: float
+    annual_maintenance: float
+
+    def __post_init__(self):
+        # Cache hot derived scalars
+        self.fuel_cost_per_dist: float = self.fuel_rate * self.fuel_price
+        self.maint_per_route: float = self.annual_maintenance / 364.0  # default T
 
 
 @dataclass
 class Route:
     """
-    A single vehicle route: sequence of nodes from depot to depot.
-
-    Open route: starts at DD, ends at PD (vehicle does both delivery and pickup)
-    Closed route: starts and ends at same depot
+    Single vehicle route: depot → [customers] → depot.
+    Open route: origin_depot_id ≠ end_depot_id.
     """
     vehicle: Vehicle
-    origin_depot_id: int        # Starting depot (DD or PD)
-    nodes: list[int] = field(default_factory=list)   # Ordered list of customer IDs visited
-    end_depot_id: Optional[int] = None               # Ending depot (may differ from origin)
+    origin_depot_id: int
+    nodes: list[int] = field(default_factory=list)
+    end_depot_id: Optional[int] = None
 
     def is_open(self) -> bool:
-        """Open route: origin ≠ destination."""
         return self.end_depot_id is not None and self.end_depot_id != self.origin_depot_id
 
 
 @dataclass
 class Solution:
-    """
-    A complete solution to the MDPDTWDD.
-    Contains a set of routes and the computed objective values.
-    """
+    """Complete MDPDTWDD solution with computed objective values."""
     routes: list[Route] = field(default_factory=list)
 
-    # Objective values (computed by evaluate())
-    TOC: float = float('inf')   # Total operating cost (Eq.15)
-    NV: int = 0                  # Number of vehicles (Eq.16)
-    TC: float = 0.0              # Travel cost (Eq.17)
-    PC: float = 0.0              # Penalty cost (Eq.18)
-    MC: float = 0.0              # Maintenance cost (Eq.19)
-    IC: float = 0.0              # Insertion cost (Eq.20)
-    FC: float = 0.0              # Fixed cost (Eq.21)
+    TOC: float = float('inf')
+    NV: int = 0
+    TC: float = 0.0
+    PC: float = 0.0
+    MC: float = 0.0
+    IC: float = 0.0
+    FC: float = 0.0
 
     def is_feasible(self) -> bool:
         return self.TOC < float('inf')
@@ -128,78 +120,148 @@ class Solution:
 @dataclass
 class ProblemInstance:
     """
-    Complete problem instance for MDPDTWDD.
+    Complete MDPDTWDD problem instance.
 
-    Sets (following Table 4 notation):
-    - W: delivery depots
-    - O: pickup depots
-    - F = W ∪ O: all depots
-    - R: static delivery customers
-    - S: static pickup customers
-    - D: dynamic pickup customers
-    - C = R ∪ S ∪ D: all customers
+    After build_distance_matrix() is called, fast lookups are available:
+      inst.dist_fast(i, j)        — O(1) numpy array lookup
+      inst.travel_time_fast(i, j) — O(1) numpy array lookup
+      inst.is_delivery[node_id]   — O(1) bool
+      inst.is_pickup_node[node_id]— O(1) bool
+      inst.is_dyn[node_id]        — O(1) bool
     """
     name: str
-    nodes: dict[int, Node] = field(default_factory=dict)   # All nodes (customers + depots)
+    nodes: dict[int, Node] = field(default_factory=dict)
 
-    # Problem parameters (from Table 15)
-    working_days: int = 364         # T: number of working days per year
-    vehicle_capacity: float = 100.0  # ∂_v
-    vehicle_speed: float = 30.0      # α_v (km/h or consistent unit)
-    fuel_rate: float = 0.07          # f_v (L/km)
-    fuel_price: float = 7.0          # p_v ($/L)
-    annual_maintenance: float = 40000.0  # M_v ($/year)
-    epsilon: float = 20.0            # ε: early penalty coefficient ($/unit time)
-    omega: float = 30.0              # ω: late penalty coefficient ($/unit time)
-    delta: float = 1.0               # δ: cost coefficient per delivery unit
-    chi: float = 1.0                 # χ: cost coefficient per pickup unit
-    gamma: float = 1.0               # γ: insertion coefficient per dynamic pickup unit
-    depot_fixed_cost: float = 0.0    # β_f: fixed cost per depot per day
-                                     # NOTE-07: not given in Table 15, using 0.0
+    working_days: int = 364
+    vehicle_capacity: float = 100.0
+    vehicle_speed: float = 30.0
+    fuel_rate: float = 0.07
+    fuel_price: float = 7.0
+    annual_maintenance: float = 40000.0
+    epsilon: float = 20.0
+    omega: float = 30.0
+    delta: float = 1.0
+    chi: float = 1.0
+    gamma: float = 1.0
+    depot_fixed_cost: float = 0.0
 
-    # Distance and time matrices (computed after loading)
+    # Legacy dict matrices (kept for compatibility, not used in hot paths)
     dist_matrix: dict[tuple[int, int], float] = field(default_factory=dict)
     time_matrix: dict[tuple[int, int], float] = field(default_factory=dict)
 
+    # ------------------------------------------------------------------ #
+    # Fast-access structures (populated by build_distance_matrix)         #
+    # ------------------------------------------------------------------ #
+    # numpy N×N distance / time arrays, row/col = _idx[node_id]
+    _dist_arr: Optional[np.ndarray] = field(default=None, repr=False)
+    _time_arr: Optional[np.ndarray] = field(default=None, repr=False)
+    _idx: dict[int, int] = field(default_factory=dict, repr=False)
+    _ids: list[int] = field(default_factory=list, repr=False)   # index → node_id
+    _inv_speed: float = field(default=0.0, repr=False)
+
+    # Per-node scalar arrays indexed by node_id (max_id+1 length, 0 for missing)
+    _l_arr: Optional[np.ndarray] = field(default=None, repr=False)
+    _r_arr: Optional[np.ndarray] = field(default=None, repr=False)
+    _demand_arr: Optional[np.ndarray] = field(default=None, repr=False)  # Q or P
+
+    # Type membership — O(1) set lookup replaces repeated Enum comparisons
+    _delivery_depot_ids: frozenset = field(default_factory=frozenset, repr=False)
+    _pickup_depot_ids: frozenset = field(default_factory=frozenset, repr=False)
+    _static_delivery_ids: frozenset = field(default_factory=frozenset, repr=False)
+    _static_pickup_ids: frozenset = field(default_factory=frozenset, repr=False)
+    _dynamic_ids: frozenset = field(default_factory=frozenset, repr=False)
+
+    # Cached list properties (populated once)
+    _delivery_depots_cache: Optional[list] = field(default=None, repr=False)
+    _pickup_depots_cache: Optional[list] = field(default=None, repr=False)
+    _all_depots_cache: Optional[list] = field(default=None, repr=False)
+    _static_customers_cache: Optional[list] = field(default=None, repr=False)
+    _dynamic_customers_cache: Optional[list] = field(default=None, repr=False)
+    _all_customers_cache: Optional[list] = field(default=None, repr=False)
+    _static_delivery_cache: Optional[list] = field(default=None, repr=False)
+    _static_pickup_cache: Optional[list] = field(default=None, repr=False)
+
+    # ------------------------------------------------------------------
+    # Boolean lookup arrays (size = max_node_id+1)
+    is_delivery: Optional[np.ndarray] = field(default=None, repr=False)   # bool[id]
+    is_pickup_node: Optional[np.ndarray] = field(default=None, repr=False)
+    is_dyn: Optional[np.ndarray] = field(default=None, repr=False)
+    is_depot_arr: Optional[np.ndarray] = field(default=None, repr=False)
+    is_dd_arr: Optional[np.ndarray] = field(default=None, repr=False)
+    is_pd_arr: Optional[np.ndarray] = field(default=None, repr=False)
+
+    # ------------------------------------------------------------------
+    # @property shims — delegate to cached values after build
     @property
     def delivery_depots(self) -> list[Node]:
-        return [n for n in self.nodes.values() if n.is_delivery_depot()]
+        if self._delivery_depots_cache is None:
+            self._delivery_depots_cache = [n for n in self.nodes.values() if n.is_delivery_depot()]
+        return self._delivery_depots_cache
 
     @property
     def pickup_depots(self) -> list[Node]:
-        return [n for n in self.nodes.values() if n.is_pickup_depot()]
+        if self._pickup_depots_cache is None:
+            self._pickup_depots_cache = [n for n in self.nodes.values() if n.is_pickup_depot()]
+        return self._pickup_depots_cache
 
     @property
     def all_depots(self) -> list[Node]:
-        return [n for n in self.nodes.values() if n.is_depot()]
+        if self._all_depots_cache is None:
+            self._all_depots_cache = [n for n in self.nodes.values() if n.is_depot()]
+        return self._all_depots_cache
 
     @property
     def static_delivery_customers(self) -> list[Node]:
-        return [n for n in self.nodes.values() if n.is_static_delivery()]
+        if self._static_delivery_cache is None:
+            self._static_delivery_cache = [n for n in self.nodes.values() if n.is_static_delivery()]
+        return self._static_delivery_cache
 
     @property
     def static_pickup_customers(self) -> list[Node]:
-        return [n for n in self.nodes.values() if n.is_static_pickup()]
+        if self._static_pickup_cache is None:
+            self._static_pickup_cache = [n for n in self.nodes.values() if n.is_static_pickup()]
+        return self._static_pickup_cache
 
     @property
     def dynamic_customers(self) -> list[Node]:
-        return [n for n in self.nodes.values() if n.is_dynamic()]
+        if self._dynamic_customers_cache is None:
+            self._dynamic_customers_cache = [n for n in self.nodes.values() if n.is_dynamic()]
+        return self._dynamic_customers_cache
 
     @property
     def all_customers(self) -> list[Node]:
-        return [n for n in self.nodes.values() if not n.is_depot()]
+        if self._all_customers_cache is None:
+            self._all_customers_cache = [n for n in self.nodes.values() if not n.is_depot()]
+        return self._all_customers_cache
 
     @property
     def static_customers(self) -> list[Node]:
-        return [n for n in self.nodes.values()
-                if n.node_type in (NodeType.STATIC_DELIVERY, NodeType.STATIC_PICKUP)]
+        if self._static_customers_cache is None:
+            self._static_customers_cache = [
+                n for n in self.nodes.values()
+                if n.node_type in (NodeType.STATIC_DELIVERY, NodeType.STATIC_PICKUP)
+            ]
+        return self._static_customers_cache
 
+    # ------------------------------------------------------------------
+    # Distance / time — hot path: O(1) array lookup
+    def dist_fast(self, i: int, j: int) -> float:
+        """O(1) distance lookup via numpy array."""
+        return self._dist_arr[self._idx[i], self._idx[j]]
+
+    def travel_time_fast(self, i: int, j: int) -> float:
+        """O(1) travel time lookup via numpy array."""
+        return self._time_arr[self._idx[i], self._idx[j]]
+
+    # Backward-compatible aliases (used everywhere in existing code)
     def dist(self, i: int, j: int) -> float:
-        """Euclidean distance between nodes i and j."""
+        if self._dist_arr is not None:
+            return self._dist_arr[self._idx[i], self._idx[j]]
         return self.dist_matrix.get((i, j), self._compute_euclidean(i, j))
 
     def travel_time(self, i: int, j: int) -> float:
-        """Travel time from i to j = distance / speed."""
+        if self._time_arr is not None:
+            return self._time_arr[self._idx[i], self._idx[j]]
         return self.dist(i, j) / self.vehicle_speed
 
     def _compute_euclidean(self, i: int, j: int) -> float:
@@ -207,16 +269,99 @@ class ProblemInstance:
         return math.sqrt((ni.x - nj.x) ** 2 + (ni.y - nj.y) ** 2)
 
     def build_distance_matrix(self):
-        """Pre-compute all pairwise distances."""
-        all_ids = list(self.nodes.keys())
-        for i in all_ids:
-            for j in all_ids:
+        """
+        Precompute all pairwise distances into a dense numpy N×N array.
+        Also builds all cached lookup structures.
+        O(N²) once; all subsequent calls are O(1).
+        """
+        all_ids = sorted(self.nodes.keys())
+        n = len(all_ids)
+        self._ids = all_ids
+        self._idx = {nid: i for i, nid in enumerate(all_ids)}
+        self._inv_speed = 1.0 / self.vehicle_speed
+
+        # Build coordinate arrays for vectorised distance computation
+        xs = np.array([self.nodes[nid].x for nid in all_ids], dtype=np.float64)
+        ys = np.array([self.nodes[nid].y for nid in all_ids], dtype=np.float64)
+
+        # Broadcasting: (N,1) - (1,N) → (N,N)
+        dx = xs[:, None] - xs[None, :]
+        dy = ys[:, None] - ys[None, :]
+        self._dist_arr = np.sqrt(dx * dx + dy * dy)
+        self._time_arr = self._dist_arr * self._inv_speed
+
+        # Also populate legacy dicts (used by clustering code)
+        for i, nid_i in enumerate(all_ids):
+            for j, nid_j in enumerate(all_ids):
                 if i != j:
-                    self.dist_matrix[(i, j)] = self._compute_euclidean(i, j)
-                    self.time_matrix[(i, j)] = self.dist_matrix[(i, j)] / self.vehicle_speed
+                    d = float(self._dist_arr[i, j])
+                    self.dist_matrix[(nid_i, nid_j)] = d
+                    self.time_matrix[(nid_i, nid_j)] = d * self._inv_speed
+
+        # ---- Type membership sets ------------------------------------ #
+        self._delivery_depot_ids = frozenset(
+            n.node_id for n in self.nodes.values() if n.is_delivery_depot()
+        )
+        self._pickup_depot_ids = frozenset(
+            n.node_id for n in self.nodes.values() if n.is_pickup_depot()
+        )
+        self._static_delivery_ids = frozenset(
+            n.node_id for n in self.nodes.values() if n.is_static_delivery()
+        )
+        self._static_pickup_ids = frozenset(
+            n.node_id for n in self.nodes.values() if n.is_static_pickup()
+        )
+        self._dynamic_ids = frozenset(
+            n.node_id for n in self.nodes.values() if n.is_dynamic()
+        )
+
+        # ---- Boolean lookup arrays ----------------------------------- #
+        max_id = max(all_ids)
+        sz = max_id + 1
+        self.is_delivery  = np.zeros(sz, dtype=bool)
+        self.is_pickup_node = np.zeros(sz, dtype=bool)
+        self.is_dyn       = np.zeros(sz, dtype=bool)
+        self.is_depot_arr = np.zeros(sz, dtype=bool)
+        self.is_dd_arr    = np.zeros(sz, dtype=bool)
+        self.is_pd_arr    = np.zeros(sz, dtype=bool)
+        for nid in self._static_delivery_ids:
+            self.is_delivery[nid] = True
+        for nid in self._static_pickup_ids:
+            self.is_pickup_node[nid] = True
+        for nid in self._dynamic_ids:
+            self.is_dyn[nid] = True
+            self.is_pickup_node[nid] = True
+        for nid in self._delivery_depot_ids:
+            self.is_depot_arr[nid] = True
+            self.is_dd_arr[nid] = True
+        for nid in self._pickup_depot_ids:
+            self.is_depot_arr[nid] = True
+            self.is_pd_arr[nid] = True
+
+        # ---- Per-node scalar arrays (indexed by node_id) ------------- #
+        self._l_arr = np.zeros(sz, dtype=np.float64)
+        self._r_arr = np.zeros(sz, dtype=np.float64)
+        self._demand_arr = np.zeros(sz, dtype=np.float64)
+        for nid, node in self.nodes.items():
+            self._l_arr[nid] = node.l_i
+            self._r_arr[nid] = node.r_i
+            # demand: Q_i for delivery, P_i for pickup/dynamic
+            if node.is_static_delivery():
+                self._demand_arr[nid] = node.Q_i
+            else:
+                self._demand_arr[nid] = node.P_i
+
+        # ---- Warm up cached list properties ------------------------- #
+        _ = self.delivery_depots
+        _ = self.pickup_depots
+        _ = self.all_depots
+        _ = self.static_customers
+        _ = self.dynamic_customers
+        _ = self.all_customers
+        _ = self.static_delivery_customers
+        _ = self.static_pickup_customers
 
     def summary(self) -> str:
-        """Human-readable summary of instance."""
         return (
             f"Instance: {self.name}\n"
             f"  Delivery depots (DD): {len(self.delivery_depots)}\n"

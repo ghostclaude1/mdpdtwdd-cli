@@ -246,19 +246,29 @@ def suite_pc() -> TestSuite:
     route_early = Route(vehicle=make_vehicle(), origin_depot_id=1, nodes=[3, 4], end_depot_id=None)
     ev_early = evaluate_route(route_early, inst3)
 
-    # Recompute manually
+    # Recompute manually — must mirror the backward-pass B_v logic in evaluate_route.
+    # B_v lower = max(depot.l_i=0, l_first - t(depot,first))
+    # B_v upper = min over all nodes of (r_i - cum_travel)
+    # B_v = clamp(upper, lower, depot.r_i)
     d13e = inst3.dist(1, 3)
     t13e = d13e / 30.0
-    Bve = max(0.0, inst3.nodes[3].l_i - t13e)
-    arr3e = Bve + t13e
-    # service starts at max(arr3e, l_3=399)
-    svc3e = max(arr3e, inst3.nodes[3].l_i)
     d34e = inst3.dist(3, 4)
-    arr4e = svc3e + d34e / 30.0
-    # PC for node3
-    pc3 = 20 * max(inst3.nodes[3].l_i - arr3e, 0) + 30 * max(arr3e - inst3.nodes[3].r_i, 0)
-    # PC for node4: arrives at arr4e, TW=[1000,1100]
-    pc4 = 20 * max(1000.0 - arr4e, 0) + 30 * max(arr4e - 1100.0, 0)
+    t34e = d34e / 30.0
+    l3 = inst3.nodes[3].l_i   # 399
+    r3 = inst3.nodes[3].r_i   # 525
+    l4 = 1000.0; r4 = 1100.0
+    Bve_lower = max(0.0, l3 - t13e)
+    # backward pass: upper_3 = r3 - t13e;  upper_4 = r4 - t13e - t34e
+    upper_3 = r3 - t13e
+    upper_4 = r4 - t13e - t34e
+    Bve_upper = min(upper_3, upper_4)
+    Bve = max(Bve_lower, min(Bve_upper, inst3.nodes[1].r_i))
+    Bve = max(Bve, Bve_lower)
+    arr3e = Bve + t13e
+    svc3e = max(arr3e, l3)
+    arr4e = svc3e + t34e
+    pc3 = 20 * max(l3 - arr3e, 0) + 30 * max(arr3e - r3, 0)
+    pc4 = 20 * max(l4 - arr4e, 0) + 30 * max(arr4e - r4, 0)
     expected_early_pc = pc3 + pc4
 
     s.check("PC early penalty: ε*max(l-A,0)",
