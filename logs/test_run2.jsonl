@@ -1,0 +1,1 @@
+{"timestamp": "2026-05-24T08:12:14.050493", "instance": "1 Instance__Sheet1", "algorithm": "3DAPANSGA-II", "run": 1, "TOC": 65365.97, "NV": 6, "CT_s": 1.4, "n_customers": 48, "n_DD": 1, "n_PD": 1, "n_static_delivery": 25, "n_static_pickup": 18, "n_dynamic": 5, "notes": [], "extra": {"cmd": "solve"}}
