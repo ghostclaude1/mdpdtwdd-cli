@@ -110,3 +110,10 @@
 **Results:** 190/190 tests — ✅ ALL PASSED
 
 **Next action:** Module 5 — Insertion Strategy fix (ISSUE-001)
+
+## [2026-05-24 19:00] NSGA-II Module Tests — decode, pmx, mutation, nsga_sort, init_population, algorithm_run, dynamic_insertion, route_quality
+**Command:** `python3 tests/test_nsga2_module.py`
+**Purpose:** Verify ANSGA-II (Section 4.3): decode, crossover, mutation, sort, full run
+**Results:** 190/190 tests — ✅ ALL PASSED
+
+**Next action:** Module 5 — Insertion Strategy fix (ISSUE-001)

@@ -145,14 +145,18 @@ def scenario_1_direct_insert(
     if best_route_idx >= 0:
         new_solution = copy.deepcopy(solution)
         new_solution.routes[best_route_idx].nodes.insert(best_pos, customer_id)
-
-        # Update cluster map for this customer (assigned to route's depot)
+        # Re-sort the modified route by l_i to maintain TW order after insertion
+        new_solution.routes[best_route_idx].nodes.sort(
+            key=lambda nid: instance.nodes[nid].l_i
+        )
         evaluate_solution(new_solution, instance)
+        # Use actual TOC delta so PC changes are accounted for
+        actual_delta = new_solution.TOC - solution.TOC
         return InsertionResult(
             success=True,
             scenario=1,
             new_solution=new_solution,
-            cost_increase=best_cost,
+            cost_increase=actual_delta,
         )
     return None
 
@@ -205,9 +209,13 @@ def scenario_2_goods_transfer(
                 if customer.P_i + test_load_1 <= route.vehicle.capacity + 1e-6:
                     # Transfer feasible, insert dynamic customer
                     new_solution = copy.deepcopy(solution)
-                    new_solution.routes[r_idx].nodes = test_route1_nodes + [customer_id]
-                    # Add transferred delivery to route2 (at end)
-                    new_solution.routes[r2_idx].nodes.append(transfer_nid)
+                    combined = test_route1_nodes + [customer_id]
+                    combined.sort(key=lambda nid: instance.nodes[nid].l_i)
+                    new_solution.routes[r_idx].nodes = combined
+                    # Add transferred delivery to route2 (sorted by l_i)
+                    r2_nodes = new_solution.routes[r2_idx].nodes + [transfer_nid]
+                    r2_nodes.sort(key=lambda nid: instance.nodes[nid].l_i)
+                    new_solution.routes[r2_idx].nodes = r2_nodes
                     evaluate_solution(new_solution, instance)
                     return InsertionResult(
                         success=True,

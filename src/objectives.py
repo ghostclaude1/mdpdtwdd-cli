@@ -63,14 +63,36 @@ def evaluate_route(
     # Start from origin depot
     origin = instance.nodes[route.origin_depot_id]
 
-    # Compute optimal departure time B_v (Constraints 31-33):
-    #   B_v = max(depot.l_i, l_first_customer - t(depot→first_customer))
-    # Departing at t=0 always causes massive early penalty because customers
-    # have l_i in range [80, 600+] while travel times are only 0.5–5 units.
+    # Compute optimal departure time B_v:
+    #
+    # Lower bound (no early violation at first node):
+    #   B_v >= l_first - t(depot, first)     [Constraint 34]
+    #   B_v >= l_depot                        [depot TW]
+    #
+    # Upper bound (no late violation at ANY node, ignoring waiting):
+    #   Forward cumulative travel time to node i: cum_i
+    #   B_v + cum_i <= r_i  →  B_v <= r_i - cum_i  for all i
+    #   B_v_upper = min(r_i - cum_i)
+    #
+    # Optimal B_v = clamp(B_v_upper, B_v_lower, depot.r_i)
+    # — depart as late as the conservative upper bound allows (minimises early
+    #   penalties) but never before the lower bound (depot/first-node TW).
     first_nid = route.nodes[0]
     first_node = instance.nodes[first_nid]
     t_to_first = instance.travel_time(route.origin_depot_id, first_nid)
-    B_v = max(origin.l_i, first_node.l_i - t_to_first)
+    B_v_lower = max(origin.l_i, first_node.l_i - t_to_first)
+
+    # Backward pass: conservative upper bound using cumulative travel times
+    # (no waiting assumed — actual arrival with waiting can only be ≥ this)
+    cum_t = 0.0
+    prev_bv = route.origin_depot_id
+    B_v_upper = origin.r_i
+    for _nid in route.nodes:
+        cum_t += instance.travel_time(prev_bv, _nid)
+        B_v_upper = min(B_v_upper, instance.nodes[_nid].r_i - cum_t)
+        prev_bv = _nid
+
+    B_v = max(B_v_lower, min(B_v_upper, origin.r_i))
 
     current_time = B_v
     result.arrival_times[route.origin_depot_id] = B_v

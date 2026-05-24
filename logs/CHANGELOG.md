@@ -50,3 +50,28 @@
 | 30       | 4,731     | (not yet)  | -         | -     |
 
 **Next:** Investigate why CT so low and TOC so high.
+
+---
+
+## [2026-05-24] Fix TW-sort in decode + B_v backward pass + insertion cost metric
+
+**Files:** src/nsga2.py, src/objectives.py, src/insertion_strategy.py
+**Change:**
+  1. `_split_into_routes` (nsga2.py): Sort customers **within** each capacity-feasible
+     sub-route by `l_i` (TW left bound). Gene order still controls capacity grouping
+     (preserving NSGA-II diversity); l_i sort controls visit sequence within each group.
+     This is the primary mechanism by which paper achieves PC=0.
+  2. `evaluate_route` (objectives.py): Added backward pass to compute `B_v_upper` —
+     the latest departure time that avoids late violations at any node (ignoring waiting).
+     B_v = clamp(B_v_upper, B_v_lower, depot.r_i). Reduces late-cascade violations.
+  3. `scenario_1_direct_insert` + `scenario_2_goods_transfer` (insertion_strategy.py):
+     After inserting dynamic customer, re-sort modified route by l_i to maintain TW order.
+     Changed `cost_increase` from detour-only to actual TOC delta (includes PC change).
+     This fixed a critical bug where "cheapest detour" scenario actually caused PC spike.
+**Reference:** SRS §3.1 (B_v), Eq.18 (PC), Table 19 (PC=0 target), Section 4.4 (insertion)
+**Test result:**
+  Instance 1: TOC=4260.8, NV=9, CT=11.2s (paper: 1654, 6, 84s) — gap -157.6%
+  Improvement from baseline: TOC 71417 → 4260 (-94.0%)
+  PC component: 35000+ → 1311 (-96%)
+  Dynamic insertion no longer causes TOC explosion (was +11777, now +444)
+**Remaining issues:** PC=1311 still non-zero; NV=9 vs paper 6; clustering may be sub-optimal

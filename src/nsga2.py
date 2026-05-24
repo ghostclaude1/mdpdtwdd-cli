@@ -150,6 +150,11 @@ def _split_into_routes(
     pds = instance.pickup_depots
     dds = instance.delivery_depots
 
+    # NOTE: Do NOT sort here — gene order encodes the routing heuristic learned
+    # by NSGA-II. Sorting at this level collapses all chromosomes to identical
+    # decoded routes, killing diversity and stalling the search.
+    # TW-based sorting happens WITHIN each capacity-feasible sub-route below.
+
     for cid in customers:
         node = instance.nodes[cid]
         demand = node.Q_i if node.is_static_delivery() else node.P_i
@@ -157,10 +162,17 @@ def _split_into_routes(
         if current_load + demand > capacity + 1e-6:
             # Start new route
             if current_route:
-                origin_id, end_id = _get_route_endpoints(
-                    current_route, depot_id, depot_node, instance, dds, pds
+                # Sort sub-route by l_i to minimise TW penalties within route.
+                # Gene order determines WHICH customers share a route (capacity
+                # grouping); l_i sort determines the visit sequence WITHIN each
+                # group. This preserves NSGA-II diversity while reducing PC.
+                current_route_sorted = sorted(
+                    current_route, key=lambda c: instance.nodes[c].l_i
                 )
-                result.append((current_route, origin_id, end_id))
+                origin_id, end_id = _get_route_endpoints(
+                    current_route_sorted, depot_id, depot_node, instance, dds, pds
+                )
+                result.append((current_route_sorted, origin_id, end_id))
             current_route = [cid]
             current_load = demand
         else:
@@ -168,10 +180,13 @@ def _split_into_routes(
             current_load += demand
 
     if current_route:
-        origin_id, end_id = _get_route_endpoints(
-            current_route, depot_id, depot_node, instance, dds, pds
+        current_route_sorted = sorted(
+            current_route, key=lambda c: instance.nodes[c].l_i
         )
-        result.append((current_route, origin_id, end_id))
+        origin_id, end_id = _get_route_endpoints(
+            current_route_sorted, depot_id, depot_node, instance, dds, pds
+        )
+        result.append((current_route_sorted, origin_id, end_id))
 
     return result if result else [([cid for cid in customers], depot_id, depot_id)]
 
