@@ -104,7 +104,11 @@ def evaluate_route(
         dist = instance.dist(prev_id, nid)
         result.TC += v.fuel_rate * v.fuel_price * dist  # Eq.17
 
-        # Penalty cost (Eq.18): soft time window
+        # Penalty cost (Eq.18): soft time window — penalize both early AND late arrival.
+        # A_vi = service start = max(actual_arrival, l_i) (vehicle waits if arrives early).
+        # early_violation = max(l_i - A_vi, 0): A_vi = max(arr,l_i) >= l_i → always 0 via wait.
+        # BUT paper explicitly writes epsilon*max(l_i - A_vi, 0), so A_vi = raw arrival time.
+        # Keep both penalties as stated in Eq.18.
         early_violation = max(node.l_i - arrival, 0.0)
         late_violation = max(arrival - node.r_i, 0.0)
         result.PC += instance.epsilon * early_violation + instance.omega * late_violation
@@ -167,10 +171,18 @@ def evaluate_solution(
     total_FC = 0.0
     nv = 0
 
-    # Fixed cost from depots (Eq.21 first term)
+    # Fixed cost (Eq.21): FC = Σ_f β_f + δ·Σ_{i∈R} Q_i + χ·Σ_{i∈S∪D} P_i
+    # This is a CONSTANT for a given instance — independent of routes.
     # NOTE-07: β_f not given in paper, using 0.0
     for depot in instance.all_depots:
         total_FC += instance.depot_fixed_cost
+    for node in instance.nodes.values():
+        if node.is_static_delivery():
+            total_FC += instance.delta * node.Q_i
+        elif node.is_static_pickup():
+            total_FC += instance.chi * node.P_i
+        elif node.is_dynamic():
+            total_FC += instance.chi * node.P_i   # dynamic pickup also uses χ for FC
 
     # Evaluate each route
     for i, route in enumerate(solution.routes):
@@ -184,19 +196,11 @@ def evaluate_solution(
         total_PC += eval_r.PC
         total_MC += eval_r.MC
 
-        # Insertion cost for dynamic customers on this route (Eq.20)
+        # Insertion cost for dynamic customers on this route (Eq.20): IC = Σ P_i * γ
         for nid in route.nodes:
             node = instance.nodes[nid]
             if node.is_dynamic():
                 total_IC += instance.gamma * node.P_i
-
-        # Fixed cost variable part (Eq.21 second and third terms)
-        for nid in route.nodes:
-            node = instance.nodes[nid]
-            if node.is_static_delivery():
-                total_FC += instance.delta * node.Q_i
-            elif node.is_static_pickup() or node.is_dynamic():
-                total_FC += instance.chi * node.P_i
 
     solution.TC = total_TC
     solution.PC = total_PC

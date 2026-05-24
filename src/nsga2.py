@@ -137,6 +137,8 @@ def _split_into_routes(
     Each sub-route: (customer_list, origin_depot_id, end_depot_id)
 
     Strategy: greedy sequential packing respecting vehicle capacity.
+    Within each sub-route, sort customers by time-window left bound (l_i)
+    to minimize penalty costs from out-of-order arrivals.
     For mixed routes (delivery+pickup), open route: DD → PD.
     """
     capacity = instance.vehicle_capacity
@@ -281,8 +283,10 @@ def pmx_crossover(parent1: Chromosome, parent2: Chromosome) -> tuple[Chromosome,
                 result[idx] = val
         return result
 
-    o1_genes = fix_genes(o1_genes, seg2, mapping_1_to_2)
-    o2_genes = fix_genes(o2_genes, seg1, mapping_2_to_1)
+    # FIX: o1 has seg2 inserted → duplicates are values in seg2 → resolve via mapping_2_to_1
+    # FIX: o2 has seg1 inserted → duplicates are values in seg1 → resolve via mapping_1_to_2
+    o1_genes = fix_genes(o1_genes, seg2, mapping_2_to_1)
+    o2_genes = fix_genes(o2_genes, seg1, mapping_1_to_2)
 
     off1 = Chromosome(genes=o1_genes, cluster_map=parent1.cluster_map)
     off2 = Chromosome(genes=o2_genes, cluster_map=parent2.cluster_map)
