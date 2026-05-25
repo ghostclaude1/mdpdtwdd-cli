@@ -476,7 +476,8 @@ def tournament_selection(
     return population[best]
 
 
-def compute_similarity(i: int, j: int, route_i: set[int], instance: ProblemInstance) -> float:
+def compute_similarity(i: int, j: int, route_i: set[int], instance: ProblemInstance,
+                       max_d: float = 0.0) -> float:
     """
     Eq.56: s_ij = 1 / (x_ij^v + d_ij/max{d_ij})
     where x_ij^v = 1 if i,j are on same route, else 0.
@@ -484,13 +485,21 @@ def compute_similarity(i: int, j: int, route_i: set[int], instance: ProblemInsta
     x_ij: 1 if i and j are both in route_i (same route before removal), else 0
     d_ij: distance between i and j
     max{d_ij}: maximum distance in instance (normalization)
+
+    ISSUE-010 fix: max_d is passed in as a pre-computed constant (cached on instance
+    or computed once per local_search call) instead of scanning dist_matrix.values()
+    on every invocation (was O(N²) × N² calls = O(N^4) per local search trigger).
     """
     x_ij = 1.0 if (i in route_i and j in route_i) else 0.0
     d_ij = instance.dist(i, j)
 
-    # max distance across all pairs
-    all_dists = list(instance.dist_matrix.values())
-    max_d = max(all_dists) if all_dists else 1.0
+    # ISSUE-010 fix: use pre-computed max_d; fallback to _dist_arr or dict scan if not provided
+    if max_d <= 0.0:
+        if instance._dist_arr is not None:
+            max_d = float(instance._dist_arr.max())
+        else:
+            all_dists = list(instance.dist_matrix.values())
+            max_d = max(all_dists) if all_dists else 1.0
 
     denominator = x_ij + (d_ij / max_d if max_d > 0 else 0)
     if denominator == 0:
@@ -533,10 +542,12 @@ def local_search(
     seed_route = route_membership.get(seed_id, set())
 
     # Step 2: Compute similarities
+    # ISSUE-010 fix: pre-compute max_d once (O(1) array lookup) instead of per-call O(N²) scan
+    _max_d = float(instance._dist_arr.max()) if instance._dist_arr is not None else 0.0
     sims = {}
     for cid in chrom.genes:
         if cid != seed_id:
-            sims[cid] = compute_similarity(seed_id, cid, seed_route, instance)
+            sims[cid] = compute_similarity(seed_id, cid, seed_route, instance, max_d=_max_d)
 
     # Step 3: Select R_c most similar customers (higher similarity = more similar)
     r_c_actual = min(r_c, len(chrom.genes) - 1)

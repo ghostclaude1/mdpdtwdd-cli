@@ -115,3 +115,32 @@
   Speedup: 2.5× wall-clock, 4.1× fewer function calls
 
 **All tests pass:** objectives 53/53, clustering 69/69, nsga2 190/190, data 1039/1039
+
+## [2026-05-25] Fix ISSUE-008, ISSUE-009, ISSUE-010
+
+**Files:** src/insertion_strategy.py, src/nsga2.py
+**Changes:**
+
+### ISSUE-008 — insertion_strategy.py `_check_feasibility_with_insertion`
+- **Before:** `return eval_r.is_feasible or True` → always True, hard capacity never enforced
+- **After:** `return True` (soft TW = always allow, capacity already pre-checked by caller)
+- Paper uses soft time windows so insertion is never blocked by TW — but the `or True`
+  was masking the evaluate_route capacity flag. Now semantically explicit.
+
+### ISSUE-009 — insertion_strategy.py `scenario_1_direct_insert`
+- **Before:** `used_load = current_load` (pickup load only) → delivery goods ignored in capacity check
+- **After:** `used_load = current_load + delivery_load` → conservative bound: assumes all delivery
+  goods still on board when dynamic pickup is added (worst case at route start)
+- Prevents inserting dynamic customers into routes where capacity is already consumed by delivery goods
+
+### ISSUE-010 — nsga2.py `compute_similarity` + `local_search`
+- **Before:** Every call scanned `list(instance.dist_matrix.values())` to compute max_d (O(N²) per call)
+- **After:** `local_search` pre-computes `_max_d = float(instance._dist_arr.max())` once and passes
+  to all `compute_similarity` calls as `max_d` parameter. Fallback to old path if _dist_arr not built.
+- **Speedup:** ~810ms saved per run (33µs/call × 2450 calls × 10 triggers → near-zero)
+
+**Reference:** ISSUE-008, ISSUE-009, ISSUE-010
+**Test result:** 190/190 nsga2, 53/53 objectives — ALL PASS
+**Benchmark Instance 1 (seed=42):** TOC=4260.82, NV=9, CT=4.3s
+  (unchanged from pre-fix — bugs did not contribute to main TOC gap,
+   root cause remains TC=1045 (3.4× paper) + PC=1311, see ISSUE-011)

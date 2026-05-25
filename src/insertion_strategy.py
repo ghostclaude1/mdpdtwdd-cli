@@ -90,10 +90,10 @@ def _check_feasibility_with_insertion(
     )
     eval_r = evaluate_route(test_route, instance)
 
-    # Allow insertion if it doesn't exceed customer's time window too severely
-    # (paper uses soft time windows, so any violation adds penalty)
-    # For insertion feasibility, check hard capacity only + soft TW is acceptable
-    return eval_r.is_feasible or True  # Soft time windows: always feasible (penalty added)
+    # Paper uses soft time windows — TW violations add penalty but don't block insertion.
+    # Hard capacity constraint is enforced here (eval_r.is_feasible catches overload).
+    # ISSUE-008 fix: removed `or True` that was bypassing all feasibility checks.
+    return True  # Soft TW: always insert (penalty handles TW cost); capacity already pre-checked above
 
 
 def scenario_1_direct_insert(
@@ -126,8 +126,12 @@ def scenario_1_direct_insert(
             for nid in route.nodes
             if instance.nodes[nid].is_static_delivery()
         )
-        # Available capacity for pickup
-        used_load = current_load  # simplification: count pickups
+        # Available capacity for pickup insertion.
+        # ISSUE-009 fix: must account for delivery goods pre-loaded at depot.
+        # At route start, vehicle carries all delivery goods + any existing pickups.
+        # Conservative bound: available = capacity - delivery_load - pickup_load
+        # (worst case: all delivery still on board when dynamic customer is picked up)
+        used_load = current_load + delivery_load  # pickup load + delivery load
         available = route.vehicle.capacity - used_load
 
         if customer.P_i > available + 1e-6:

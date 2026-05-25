@@ -100,3 +100,90 @@ NOTE-07: β_f appears in Eq.21 (FC) but the paper doesn't give its value.
 Set to 0. If paper uses a non-zero β_f, TOC will be systematically lower
 in our results.
 **Affected files:** src/objectives.py
+
+---
+
+## [ISSUE-008] BUG-CRITICAL: _check_feasibility_with_insertion always returns True
+**Status:** OPEN
+**Priority:** CRITICAL
+**Opened:** 2026-05-25
+**Description:**
+`_check_feasibility_with_insertion` (insertion_strategy.py) ends with:
+  `return eval_r.is_feasible or True  # Soft time windows: always feasible`
+This means even when `evaluate_route` correctly detects a hard capacity violation
+(is_feasible=False), the function ignores it and returns True. Hard capacity constraints
+are never enforced in insertion feasibility checks.
+**Impact:** Routes can be assigned dynamic customers that overflow vehicle capacity,
+causing infeasible solutions with artificially low detour cost. Downstream evaluate_route
+will flag infeasible but the solution is still accepted into the result.
+**Affected files:** src/insertion_strategy.py line ~87
+**Fix:** Change to `return True` (keep soft TW) but add explicit hard capacity check:
+  `if current_load + customer.P_i > vehicle.capacity + 1e-6: return False`
+  The existing capacity pre-check in scenario_1 handles this, so the main risk is
+  when _check_feasibility_with_insertion is called for TW-only validation.
+**Linked:** ISSUE-001
+
+---
+
+## [ISSUE-009] BUG-HIGH: scenario_1_direct_insert ignores delivery load in capacity check
+**Status:** OPEN
+**Priority:** HIGH
+**Opened:** 2026-05-25
+**Description:**
+In `scenario_1_direct_insert`, the capacity available for a dynamic pickup customer
+is computed as:
+  `used_load = current_load  # = sum of existing PICKUP loads only`
+  `available = route.vehicle.capacity - used_load`
+The variable `delivery_load` is computed but never subtracted from available.
+**Example:** Route with 80 delivery demand + 0 pickups: available = 100 - 0 = 100.
+A dynamic customer with P_i=30 passes the check. But at the start of the route,
+the vehicle carries 80 delivery goods + 30 pickup = 110 > capacity.
+**Affected files:** src/insertion_strategy.py, scenario_1_direct_insert ~line 130
+**Fix:** Change `used_load = current_load` to:
+  `used_load = current_load + delivery_load` (or more precisely:
+  the max concurrent load = max over all positions of (remaining_delivery + pickups_so_far))
+  For a conservative fix: treat initial_available = capacity - delivery_load (worst case).
+**Linked:** ISSUE-001, ISSUE-008
+
+---
+
+## [ISSUE-010] BUG-PERF: compute_similarity recomputes max_d on every call via O(N²) dict scan
+**Status:** OPEN
+**Priority:** MEDIUM
+**Opened:** 2026-05-25
+**Description:**
+`compute_similarity` (nsga2.py) calls `list(instance.dist_matrix.values())` + `max()`
+on every invocation to find max_d. dist_matrix has N² entries. For N=50 customers:
+  - 2500 dict values scanned per call
+  - local_search calls this for N*(N-1) ≈ 2450 pairs per trigger
+  - At 33µs/call × 2450 calls = 81ms per local_search trigger
+  - ~10 triggers per run = 810ms overhead per instance
+**Affected files:** src/nsga2.py, compute_similarity
+**Fix:** Pre-compute `max_d = float(instance._dist_arr.max())` once at local_search entry
+and pass it as a parameter, or cache on instance as `instance._max_dist`.
+**Linked:** performance
+
+---
+
+## [ISSUE-011] FINDING: TOC gap root cause decomposition (Instance 1, seed=42)
+**Status:** OPEN
+**Priority:** HIGH
+**Opened:** 2026-05-25
+**Description:**
+Full TOC breakdown for current best (gen=150, pop=100):
+  TOC=3816  (paper: 1654)
+  TC=1045   (paper implied ≈304)  ← main culprit, 3.4x too high
+  PC=1311   (paper implied ≈0)    ← second culprit, non-zero TW penalty
+  MC=769    NV=7  (paper: MC=659, NV=6)
+  IC=0, FC=691 (correct, constant)
+
+TC is 3.4x too high → routes are ~3x longer in total distance.
+Root causes (in order of impact):
+  1. Routes have too many vehicles with short inefficient paths
+     (NV=7-9 vs paper NV=6 → each extra vehicle adds a depot-return leg)
+  2. Clustering assigns customers to suboptimal depots (s/t=0.5 NOTE-08)
+  3. PC=1311 from TW violations despite l_i sort within routes
+PC=1311 → the l_i-sort-within-route approach reduces but does not eliminate penalties.
+The paper's PC ≈ 0 implies a fundamentally different route structure.
+**Next action:** Investigate if open-route handling (DD→PD) reduces PC significantly,
+and whether FC=691 matches paper. If paper uses different FC formula, TC estimate changes.

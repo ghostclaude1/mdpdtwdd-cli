@@ -218,3 +218,62 @@
 **Results:** 190/190 tests — ✅ ALL PASSED
 
 **Next action:** Module 5 — Insertion Strategy fix (ISSUE-001)
+
+## [2026-05-25] Full Module Audit — Agent code review pass
+
+**Command:** Code audit (no run command)
+**Purpose:** Systematic audit of all 7 modules against SRS.md and paper spec.
+**Results:** 4 bugs found, 1 performance issue, 1 root-cause finding.
+
+**Findings:**
+
+| ID | Severity | Module | Description |
+|----|----------|--------|-------------|
+| ISSUE-008 | CRITICAL | insertion_strategy.py | `_check_feasibility_with_insertion` always returns True (`or True` bug) |
+| ISSUE-009 | HIGH | insertion_strategy.py | scenario_1 capacity check ignores delivery load (uses pickup-only load) |
+| ISSUE-010 | MEDIUM | nsga2.py | `compute_similarity` scans full dist_matrix.values() per call (O(N²) × N² calls) |
+| ISSUE-011 | HIGH | algorithm.py | TOC gap decomposition: TC is 3.4x too high, PC=1311 non-zero |
+
+**Clean (no bugs found):**
+- data_model.py — distance matrix, numpy arrays, type membership: CORRECT
+- data_loader.py — node type detection, CSV parsing: CORRECT (verified by 1039 tests)
+- objectives.py — TC/PC/MC/IC/FC Eq.15-21: CORRECT (verified by 53 tests)
+- clustering.py — 3D AP Eq.49-53: CORRECT (verified by 69 tests)
+- nsga2.py — PMX crossover verified correct (unique genes, valid permutations)
+- nsga2.py — adaptive_mutation_rate: correct (0 at gen=150, expected)
+- nsga2.py — fast_nondominated_sort: numpy vectorised, correct
+- algorithm.py — main loop range(1, m_gen+1): correct (150 generations run)
+
+**TOC analysis (Instance 1, seed=42, gen=150, pop=100):**
+  TOC=3816 (paper 1654, gap=+131%)
+  TC=1045 (paper ≈304) — **3.4× too high** — long routes or excess vehicles
+  PC=1311 (paper ≈0)  — TW penalties still significant despite l_i sort
+  MC=769 NV=7 (paper MC=659, NV=6) — 1 extra vehicle
+  FC=691, IC=0 — correct
+
+**Priority fix order:**
+  1. ISSUE-008: Fix `or True` in _check_feasibility_with_insertion
+  2. ISSUE-009: Fix delivery load exclusion in scenario_1 capacity check
+  3. Investigate PC=1311 source (open route handling)
+  4. ISSUE-010: Cache max_d in compute_similarity
+
+**Next action:** Fix ISSUE-008, ISSUE-009, rerun Instance 1, compare TOC.
+
+## [2026-05-25 00:54] Objective Function Module Tests — tc, pc, mc, ic, fc, toc, fitness, mc_diagnosis
+**Command:** `python3 tests/test_objectives_module.py`
+**Purpose:** Verify Eq.15–21 (TC/PC/MC/IC/FC/TOC) implementation correctness
+**Results:** 53/53 tests — ✅ ALL PASSED
+**Key findings:**
+  - MC interpretation: 1-per-route (M_v/T × NV) confirmed correct vs paper TOC=1654
+  - FC is constant per instance (independent of routing) ✓
+  - IC correctly counts γ*P_i for dynamic customers only ✓
+  - TC = f_v*p_v*Σdist for all arcs ✓
+  - PC uses raw arrival time (not service_start) per Eq.18 ✓
+**Next action:** Module 3 — Clustering (src/clustering.py)
+
+## [2026-05-25 00:54] NSGA-II Module Tests — decode, pmx, mutation, nsga_sort, init_population, algorithm_run, dynamic_insertion, route_quality
+**Command:** `python3 tests/test_nsga2_module.py`
+**Purpose:** Verify ANSGA-II (Section 4.3): decode, crossover, mutation, sort, full run
+**Results:** 190/190 tests — ✅ ALL PASSED
+
+**Next action:** Module 5 — Insertion Strategy fix (ISSUE-001)
