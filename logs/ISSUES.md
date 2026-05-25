@@ -187,3 +187,33 @@ PC=1311 → the l_i-sort-within-route approach reduces but does not eliminate pe
 The paper's PC ≈ 0 implies a fundamentally different route structure.
 **Next action:** Investigate if open-route handling (DD→PD) reduces PC significantly,
 and whether FC=691 matches paper. If paper uses different FC formula, TC estimate changes.
+
+---
+
+## [ISSUE-012] BUG-CRITICAL: Coordinate scale mismatch — TC = 1045 vs paper 192
+**Status:** OPEN
+**Priority:** CRITICAL
+**Opened:** 2026-05-25
+**Description:**
+Through backward analysis of paper TOC=1654 for Instance 1:
+  TOC = TC + PC + MC + IC + FC
+  1654 = TC+PC + 659 (MC,NV=6) + 112 (IC) + 691 (FC)
+  → TC + PC = 192
+
+Physical minimum TC at current coord scale (6-route geo-cluster NN) = 1189.
+TC=192 is **6.2× below our physical minimum** — unreachable at current scale.
+
+Scale factor needed: 0.162 → 1 coord unit ≈ 160m (not 1km).
+
+Evidence supporting scale=0.16:
+- DD→PD at scale 0.16: 49.1×0.16 = 7.9 km ✓ (city logistics)
+- Customer area: 149×0.16 = 24 km ✓ (Chongqing metro area)
+- Our TC=1045 × 0.16 = 167 ≈ paper TC≈192 ✓ (within 13%)
+- Paper coords created fresh (NOT from pr10 directly — pr10 depot at (425,170) vs Instance 1 at (-36,49))
+
+**Affected files:** src/data_loader.py (coord loading) or src/data_model.py (distance computation)
+**Fix:** Add a COORD_SCALE_FACTOR = 0.16 multiplier when computing Euclidean distances in
+`build_distance_matrix()`, OR when loading x/y from CSV in `load_benchmark_instance()`.
+**Must verify:** Does scale=0.16 also fix PC=1311→≈0? (travel times scale → TW compliance improves)
+**Reference:** F-007 in findings.md, SRS §2.2 (Euclidean distance), ISSUE-001
+**Linked:** ISSUE-001, ISSUE-011

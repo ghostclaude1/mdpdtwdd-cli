@@ -144,3 +144,20 @@
 **Benchmark Instance 1 (seed=42):** TOC=4260.82, NV=9, CT=4.3s
   (unchanged from pre-fix — bugs did not contribute to main TOC gap,
    root cause remains TC=1045 (3.4× paper) + PC=1311, see ISSUE-011)
+
+## [2026-05-25] Phase 1 Bug Hunt — Open Route Audit + TC Scale Root Cause
+
+**Files:** logs/ISSUES.md, logs/EXPERIMENTS.md, .claude/planning/findings.md, .claude/planning/task_plan.md
+**Change:** Full investigation session — no code changes, findings + planning files updated.
+**Reference:** ISSUE-011, ISSUE-012
+
+**H1 (Open Routes) — FALSIFIED:**
+All 7 routes in best solution are OPEN (DD→PD). Open route logic working correctly.
+
+**H2 (TC root cause) — BUG CONFIRMED → ISSUE-012:**
+Backward analysis: TOC=1654, MC=659(NV=6), FC=691, IC=112 → TC+PC = 192.
+Physical minimum TC (6-route geo-cluster NN) = 1189 → ratio 6.2× → TC=192 unreachable at current scale.
+Scale factor needed: 0.162. Our TC=1045 × 0.162 = 169 ≈ 192 ✓.
+Also explains PC=1311: travel times 6× too long → TW violations cascade.
+
+**Next:** Fix COORD_SCALE_FACTOR=0.162 in build_distance_matrix(), rerun, verify TOC≈1654.

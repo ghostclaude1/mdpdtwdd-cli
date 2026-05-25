@@ -277,3 +277,32 @@
 **Results:** 190/190 tests — ✅ ALL PASSED
 
 **Next action:** Module 5 — Insertion Strategy fix (ISSUE-001)
+
+## [2026-05-25] Phase 1 — H1 Open Route Audit + H2 TC Scale Investigation
+
+**Command:** Code trace + manual computation
+**Purpose:** Identify root cause of TC=1045 (3.4× paper TC≈192)
+
+**Phase 1 — H1 Open Route (FALSIFIED):**
+- Verified: all 7 routes in best solution are OPEN (DD→PD) ✓
+- H1 eliminated: open route logic is working correctly
+
+**Phase 2 — TC Root Cause:**
+- l_i-sort test: removing l_i-sort makes TC slightly worse (1052 vs 1045), PC explodes (3583 vs 1311)
+  → l_i-sort is HELPING not hurting
+- Geo-cluster 6-route NN: total_dist=2426, TC=1189 (best possible naive routing)
+- Paper TC≈192 → requires dist=392 units
+- 1189 > 392 × 3.0 → SCALE MISMATCH CONFIRMED
+
+**Key finding (F-007):**
+- Paper TC=192 is physically impossible at current coord scale
+- Scale factor needed: 0.162 (1 coord unit ≈ 160m)
+- Our TC=1045 × 0.162 = 169 ≈ paper 192 ✓
+- Physical explanation: benchmarks use 160m grid, not 1km grid
+- This also explains PC=1311: at scale 1.0, travel times are 6× too long → vehicles arrive
+  wildly out of TW window → massive penalties
+
+**Filed:** ISSUE-012 (coordinate scale mismatch)
+
+**Next action:** Test COORD_SCALE_FACTOR=0.162 in data_model.build_distance_matrix()
+  Expected: TC drops from 1045 → ~170, PC drops from 1311 → ~0, TOC → ~1600 ≈ paper 1654
